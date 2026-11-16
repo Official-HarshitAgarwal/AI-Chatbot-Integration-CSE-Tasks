@@ -694,5 +694,3 @@ eSim is licensed under the **GNU General Public License v3.0**. See [LICENSE](LI
 <p align="center">
   <sub>⭐ If you find eSim useful, consider giving it a star on GitHub!</sub>
 </p>
-#   A I - C h a t b o t - I n t e g r a t i o n - C S E - T a s k s  
- 

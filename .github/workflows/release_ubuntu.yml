@@ -1,0 +1,129 @@
+# Build the Ubuntu release zip and publish it to GitHub Releases.
+#
+# Originally by Sai Charan Lanka (@saicharan0112), Nov 12 2022 (PR#230, Issue#211).
+# Rewritten for the unified installer: it used to assemble a release by checking
+# out FOSSEE/eSim@master plus FOSSEE/nghdl and pulling install-eSim.sh off the
+# `installers` branch, which predates Ubuntu/install-eSim.sh and the embedded
+# nghdl/ tree — and built upstream's code instead of the tagged commit.
+#
+# Trigger: push a tag starting with "v" (v2.5, v2.6, ...), or run it by hand from
+# the Actions tab (workflow_dispatch) to get a zip without cutting a release.
+#
+# The zip is built by ./make-release.sh from the tagged commit — the same script
+# maintainers run locally, so CI is not a second recipe that can drift. What goes
+# in it is decided by .gitattributes (export-ignore), and the curl one-liner in
+# Ubuntu/bootstrap.sh downloads GitHub's tarball of that same commit, which
+# GitHub filters by those same rules. Zip and curl ship an identical file set.
+
+name: Auto release of eSim for Ubuntu OS
+
+on:
+  push:
+    tags:
+      - 'v*'
+      # v2.6-win marks which commit a Windows installer was built from; the
+      # exe is uploaded by hand. Without this exclusion the tag push mints a
+      # spurious "eSim vX.Y-win" release carrying only the Ubuntu zip.
+      - '!v*-win'
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create the Release and upload its assets
+
+jobs:
+  release_eSim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zip xz-utils
+
+      - name: Read release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: release_version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          packaged_version="$(tr -d '\r\n' < VERSION)"
+          if [ "$version" != "$packaged_version" ]; then
+            echo "::error::Release tag must match VERSION ($packaged_version)."
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the release zip
+        run: |
+          chmod +x make-release.sh
+          ./make-release.sh
+          ls -lh dist/
+
+      # Fail loudly rather than publish a release that quietly carries the
+      # developer tree. These are exactly what .gitattributes is meant to drop,
+      # so a regression here means someone broke the export-ignore rules.
+      - name: Verify the zip is a user build, not a dev tree
+        run: |
+          zip="$(ls dist/eSim-*-ubuntu.zip)"
+          for junk in PACKAGING.md MAINTAINERS-PACKAGING.md CONTRIBUTION.md \
+                      setup.py requirements.txt conf.py; do
+            unzip -l "$zip" | grep -qE "/$junk\$" \
+              && { echo "::error::$junk leaked into $zip"; exit 1; }
+          done
+          for junk in windows code docs scripts; do
+            unzip -l "$zip" | grep -qE "/$junk/" \
+              && { echo "::error::$junk/ leaked into $zip"; exit 1; }
+          done
+          unzip -l "$zip" | grep -qE '\.raw$|plot_data_.*\.txt$' \
+            && { echo "::error::regeneratable ngspice output leaked into $zip"; exit 1; }
+          # ...and that it is still installable.
+          for need in install-eSim.sh VERSION nghdl.zip; do
+            unzip -l "$zip" | grep -qE "/$need\$" \
+              || { echo "::error::$need missing from $zip"; exit 1; }
+          done
+          # patches/ngspice IS shipped, and this is the check that says so.
+          # install-nghdl.sh applies every patches/ngspice/*.patch to the
+          # extracted simulator tree (apply_esim_patches), and it does that
+          # from the release tree, not from git -- but it skips silently when
+          # the directory is absent. So an empty patches/ here does not fail
+          # the install, it ships a simulator missing the d_cosim
+          # operating-point fix. Fail the release instead.
+          unzip -l "$zip" | grep -qE "/patches/ngspice/.+\.patch\$" \
+            || { echo "::error::patches/ngspice/*.patch missing from $zip -- the simulator would ship unpatched"; exit 1; }
+          echo "OK: $zip is clean and complete"
+
+      - name: Publish the Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: eSim-${{ steps.release_version.outputs.version }}
+          files: |
+            dist/eSim-*-ubuntu.zip
+            dist/eSim-*-ubuntu.zip.sha256
+          body: |
+            ## Ubuntu
+
+            Supported: Ubuntu 24.04 / 25.04 / 26.04 (64-bit).
+
+            **Install with one line** (nothing to download by hand):
+
+            ```
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/Ubuntu/bootstrap.sh | ESIM_BRANCH=${{ github.ref_name }} bash
+            ```
+
+            Keep `ESIM_BRANCH` set to `${{ github.ref_name }}` to install this release.
+
+            **Or grab the zip below**, then:
+
+            ```
+            unzip eSim-*-ubuntu.zip && cd eSim-*/ && ./install-eSim.sh --install
+            ```
+
+            To remove it again: `./install-eSim.sh --uninstall`
+
+      # Manual run (no tag): keep the zip as a downloadable build artifact.
+      - name: Upload the zip as a build artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eSim-ubuntu-zip
+          path: dist/eSim-*-ubuntu.zip*
